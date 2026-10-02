@@ -182,6 +182,14 @@ select{display:block;width:100%;margin-top:4px;padding:10px 12px;border:1px soli
 .payday{background:color-mix(in srgb,var(--accent) 10%,var(--card));border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line));border-radius:12px;padding:10px 14px;font-size:13px;margin-bottom:12px}
 .payday b{font-family:"Manrope",sans-serif;font-size:15px}
 .payall{margin-bottom:6px}
+/* 来月の計画 */
+.plan-seg{margin-bottom:12px}
+.plan-free{padding:14px;border-radius:14px;background:var(--bg);margin-bottom:10px}
+.plan-free .big{font-size:26px}
+.plan-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:13px;margin-bottom:10px}
+.plan-kpis .n{font-weight:700}
+.plan-usual{font-size:13px;color:var(--sub);padding:10px 12px;border:1px dashed var(--line);border-radius:12px;margin-bottom:14px;line-height:1.6}
+.plan-usual b{color:var(--ink)}.plan-usual.bad,.plan-usual.bad b{color:var(--bad)}
 </style>
 </head>
 <body>
@@ -229,6 +237,7 @@ select{display:block;width:100%;margin-top:4px;padding:10px 12px;border:1px soli
 
   <!-- 分析 -->
   <section class="tab" id="tab-stats" hidden>
+    <div class="card"><h2>来月の計画</h2><div id="plan"></div></div>
     <div class="card"><h2>支出の内訳</h2><div id="donut"></div></div>
     <div class="card"><h2>項目別の予算</h2><div id="catBudgets"></div></div>
     <div class="card"><h2>月ごとの推移（6ヶ月）</h2><div id="trend"></div></div>
@@ -295,7 +304,7 @@ const DEFAULT_SETTINGS={
     paidy:{enabled:true,name:'Paidy',dueDay:10,schedule:[{ym:'2026-09',amount:11823},{ym:'2026-10',amount:6575},{ym:'2026-11',amount:4583},{ym:'2026-12',amount:4583},{ym:'2027-01',amount:4583}]}
   }
 };
-function freshDB(){const s=JSON.parse(JSON.stringify(DEFAULT_SETTINGS));s.trackFrom=today();return {version:1,entries:[],noSpend:[],paid:{},settings:s}}
+function freshDB(){const s=JSON.parse(JSON.stringify(DEFAULT_SETTINGS));s.trackFrom=today();return {version:1,entries:[],noSpend:[],paid:{},plans:{},settings:s}}
 function load(){
   const f=freshDB();
   try{const r=localStorage.getItem(KEY);if(r){const d=JSON.parse(r);const s=Object.assign(f.settings,d.settings||{});
@@ -306,7 +315,7 @@ function load(){
     if(s.payAll===undefined)s.payAll=true;
     if(s.paidOnDue===undefined)s.paidOnDue=false;
     [FIXED_CAT,DEBT_CAT].forEach(c=>{if(!s.expenseCats.includes(c))s.expenseCats.splice(s.expenseCats.length-1,0,c)});
-    return {version:1,entries:Array.isArray(d.entries)?d.entries:[],noSpend:Array.isArray(d.noSpend)?d.noSpend:[],paid:(d.paid&&typeof d.paid==='object')?d.paid:{},settings:s}}}catch(e){}
+    return {version:1,entries:Array.isArray(d.entries)?d.entries:[],noSpend:Array.isArray(d.noSpend)?d.noSpend:[],paid:(d.paid&&typeof d.paid==='object')?d.paid:{},plans:(d.plans&&typeof d.plans==='object')?d.plans:{},settings:s}}}catch(e){}
   return f;
 }
 function save(){try{localStorage.setItem(KEY,JSON.stringify(db));return true}catch(e){toast('保存できませんでした。設定からデータを書き出してください');return false}}
@@ -564,6 +573,47 @@ function bindFixedSettings(root){
   });
 }
 
+/* --- 来月の計画（決まっている収入と支出を入れると、固定費・返済を引いて「自由に使えるお金」が出る） --- */
+let planTarget='next'; /* 'next'＝来月、'cur'＝今月 */
+const planYM=()=>planTarget==='next'?addMonth(ymOf(today()),1):ymOf(today());
+function planOf(ym){if(!db.plans||typeof db.plans!=='object')db.plans={};if(!db.plans[ym]||typeof db.plans[ym]!=='object')db.plans[ym]={income:0,items:[]};const p=db.plans[ym];if(!Array.isArray(p.items))p.items=[];return p}
+function planSummary(ym){
+  const p=planOf(ym);const income=Math.round(Number(p.income))||0;
+  const fixedRows=obligations(`${ym}-01`,`${ym}-${pad(daysIn(ym))}`),fixed=sum(fixedRows);
+  const items=p.items.filter(i=>Number(i.amount)>0),planned=sum(items);
+  const f=forecastNext();const free=income-fixed-planned;
+  return {ym,income,fixed,fixedCount:fixedRows.length,planned,plannedCount:items.length,free,perDay:free/daysIn(ym),usual:f.varTotal,basis:f.basis,afterUsual:free-f.varTotal};
+}
+function planResultHTML(){
+  const s=planSummary(planYM());
+  if(!s.income)return `<div class="plan-free"><div class="lbl">${ymLabel(s.ym)}の固定費・返済（${s.fixedCount}件）</div><div class="mid">${yen(s.fixed)}</div><div class="sub">収入を入れると、これと決まっている支出を引いた「自由に使えるお金」が出ます</div></div>`;
+  const ok=s.free>=0;
+  return `<div class="plan-free"><div class="lbl">${ymLabel(s.ym)}に自由に使えるお金</div><div class="big ${ok?'good':'bad'}">${yen(s.free)}</div><div class="sub">${ok?`1日あたり ${yen(s.perDay)}（${daysIn(s.ym)}日で割った額）`:'収入より、決まっている支払いの方が多い状態です'}</div></div>
+  <div class="plan-kpis"><div><div class="lbl">収入</div><div class="n">${yen(s.income)}</div></div><div><div class="lbl">固定費・返済 ${s.fixedCount}件</div><div class="n">−${yen(s.fixed)}</div></div><div><div class="lbl">決まった支出 ${s.plannedCount}件</div><div class="n">−${yen(s.planned)}</div></div></div>
+  ${s.usual>0?`<div class="plan-usual ${s.afterUsual>=0?'':'bad'}">普段どおり使うと（変動費 ${yen(s.usual)}・${s.basis}）、月末に残るのは <b>${yen(s.afterUsual)}</b>${s.afterUsual<0?'。普段より使い方を抑える必要があります':''}</div>`:'<div class="plan-usual">普段の支出が記録されていくと、「このまま使うと月末にいくら残るか」も出ます</div>'}`;
+}
+function planHTML(){
+  const ym=planYM(),p=planOf(ym);
+  const rows=p.items.map(i=>`<tr data-pl="${esc(i.id)}"><td data-l="内容"><input type="text" class="pl-name" value="${esc(i.name)}" placeholder="例：車検、帰省" aria-label="内容"></td><td data-l="金額（円）"><input type="number" inputmode="numeric" class="pl-amt" min="0" value="${i.amount||''}" placeholder="金額" aria-label="金額"></td><td class="rm"><button type="button" class="del" data-rmpl="${esc(i.id)}" aria-label="削除">×</button></td></tr>`).join('');
+  return `<div class="seg plan-seg"><button type="button" data-pltgt="cur" class="${planTarget==='cur'?'on':''}">今月</button><button type="button" data-pltgt="next" class="${planTarget==='next'?'on':''}">来月</button></div>
+  <div class="plan"><div id="planResult">${planResultHTML()}</div>
+  <div class="plan-form"><label>${ymLabel(ym)}の収入（給料など・円）<input type="number" inputmode="numeric" id="plIncome" value="${p.income||''}" placeholder="例：230000"></label>
+  <h4>もう決まっている支出</h4><p class="hint">固定費・返済は自動で引かれるので、それ以外の決まっている出費（車検、冠婚葬祭、帰省など）を入れてください。入力は自動で保存されます。</p>
+  <div class="tblwrap"><table class="fxt fx-paidy"><thead><tr><th>内容</th><th>金額（円）</th><th></th></tr></thead><tbody id="plRows">${rows}</tbody></table></div>
+  <button type="button" class="ghost" id="addPl">＋ 支出を追加</button></div></div>`;
+}
+/* 画面の入力を db.plans に反映 */
+function readPlan(){const el=document.getElementById('plIncome');if(!el)return;const p=planOf(planYM());p.income=Math.round(Number(el.value))||0;p.items=[...document.querySelectorAll('#plRows tr')].map(tr=>({id:tr.dataset.pl,name:tr.querySelector('.pl-name').value.trim(),amount:Math.round(Number(tr.querySelector('.pl-amt').value))||0}))}
+/* 計画カードの操作（root は id="plan" の要素。描画後に一度だけ呼ぶ）。入力のたびに保存し、結果だけ描き直す */
+function bindPlan(root){
+  root.addEventListener('input',e=>{if(e.target.closest('#plIncome,#plRows')){readPlan();save();root.querySelector('#planResult').innerHTML=planResultHTML()}});
+  root.addEventListener('click',e=>{const t=e.target.closest('button');if(!t)return;
+    if(t.dataset.pltgt){readPlan();save();planTarget=t.dataset.pltgt;root.innerHTML=planHTML()}
+    else if(t.id==='addPl'){readPlan();planOf(planYM()).items.push({id:'pl'+uid(),name:'',amount:0});save();root.innerHTML=planHTML();const n=root.querySelector('#plRows tr:last-child .pl-name');if(n)n.focus()}
+    else if(t.dataset.rmpl!==undefined){readPlan();const p=planOf(planYM());p.items=p.items.filter(i=>i.id!==t.dataset.rmpl);save();root.innerHTML=planHTML()}
+  });
+}
+
 function backupDays(){const lb=db.settings.lastBackup;return lb?Math.floor((parseD(today())-parseD(lb))/864e5):null}
 function markBackup(){db.settings.lastBackup=today();save()}
 function exportText(){return JSON.stringify(db)}
@@ -584,6 +634,7 @@ function importJSON(text){try{const d=JSON.parse(text);if(!d||!Array.isArray(d.e
   d.entries.forEach(e=>{if(e&&e.id&&!ids.has(e.id)&&/^\d{4}-\d{2}-\d{2}$/.test(e.date)&&e.cat&&(e.type==='expense'||e.type==='income')&&Number(e.amount)>0){db.entries.push({id:String(e.id),date:e.date,type:e.type,cat:String(e.cat),amount:Math.round(Number(e.amount)),memo:String(e.memo||'')});ids.add(e.id);n++}});
   db.noSpend=[...new Set([...db.noSpend,...(Array.isArray(d.noSpend)?d.noSpend:[])])];
   if(d.paid&&typeof d.paid==='object')Object.assign(db.paid,d.paid);
+  if(d.plans&&typeof d.plans==='object'){if(!db.plans)db.plans={};Object.keys(d.plans).forEach(ym=>{if(!db.plans[ym])db.plans[ym]=d.plans[ym]})}
   save();renderAll();toast(`${n}件を取り込みました`)}catch(e){toast('取り込めませんでした。書き出したデータか確認してください')}}
 let toastT;function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),2600)}
 
@@ -619,6 +670,7 @@ function renderAll(){
   $('catBudgets').innerHTML=catBudgetHTML(s.exp);
   $('trend').innerHTML=trendHTML(viewYM,6);
   $('forecast').innerHTML=forecastHTML();
+  $('plan').innerHTML=planHTML();
   $('listTitle').textContent=`${ymLabel(viewYM)}の明細`;
   const rows=inMonth(viewYM).sort(sortDesc);
   $('rows').innerHTML=rows.length?rows.map(e=>`<li><div><span class="d">${e.date.slice(5).replace('-','/')}</span>${tagOf(e)}${e.memo?`<span class="memo">${esc(e.memo)}</span>`:''}</div><div style="display:flex;align-items:center;gap:2px">${amtOf(e)}<button class="del" data-del="${esc(e.id)}" aria-label="削除">×</button></div></li>`).join(''):'<li class="empty" style="display:block">下の「＋ 記録」から入力できます</li>';
@@ -667,7 +719,7 @@ $('pasteImport').onclick=()=>{const v=$('sIO').value.trim();if(!v){toast('書き
 $('resetBtn').onclick=()=>{if(!confirm('すべての記録と設定を削除します。元に戻せません。削除しますか？'))return;db=freshDB();save();renderForm();renderAll();fillSettings();toast('全データを削除しました')};
 document.addEventListener('click',e=>{const b=e.target.closest('[data-del]');if(!b)return;if(!confirm('この記録を削除しますか？'))return;const id=b.dataset.del;if(id.startsWith('ob-'))delete db.paid[id.slice(3)];db.entries=db.entries.filter(x=>String(x.id)!==id);save();renderAll();toast('削除しました')});
 document.addEventListener('click',e=>{const b=e.target.closest('[data-pay]');if(!b)return;togglePaid(b.dataset.pay);renderAll()});
-bindFixedSettings($('tab-settings'));
+bindFixedSettings($('tab-settings'));bindPlan($('plan'));
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){db=load();renderAll()}});
 
 $('fDate').value=today();renderForm();renderAll();
