@@ -296,7 +296,7 @@ const FIXED_CAT='固定費',DEBT_CAT='返済';
 const DEFAULT_SETTINGS={
   monthlyBudget:150000,catBudgets:{},
   expenseCats:['食費','外食','日用品','交通','住居','光熱・通信','サブスク','娯楽','交際','衣服・美容','医療',FIXED_CAT,DEBT_CAT,'その他'],
-  incomeCats:['給与','副収入','その他'],lastBackup:null,trackFrom:null,payAll:true,paidOnDue:false,
+  incomeCats:['給与','副収入','その他'],lastBackup:null,trackFrom:null,payAll:true,paidOnDue:false,monthStartsAtPayday:true,
   fixed:[{id:'fx1',name:'楽天ひかり（コンビニ払い・手数料込）',amount:4400,day:null}],
   debts:{
     acom:{enabled:true,name:'アコム',balance:875360,asOf:'2026-09-30',nextDue:'2026-11-04',cycle:'payday',rate:15,minPct:3},
@@ -314,6 +314,7 @@ function load(){
     if(!s.trackFrom)s.trackFrom=today();
     if(s.payAll===undefined)s.payAll=true;
     if(s.paidOnDue===undefined)s.paidOnDue=false;
+    if(s.monthStartsAtPayday===undefined)s.monthStartsAtPayday=true;
     [FIXED_CAT,DEBT_CAT].forEach(c=>{if(!s.expenseCats.includes(c))s.expenseCats.splice(s.expenseCats.length-1,0,c)});
     return {version:1,entries:Array.isArray(d.entries)?d.entries:[],noSpend:Array.isArray(d.noSpend)?d.noSpend:[],paid:(d.paid&&typeof d.paid==='object')?d.paid:{},plans:(d.plans&&typeof d.plans==='object')?d.plans:{},settings:s}}}catch(e){}
   return f;
@@ -331,11 +332,18 @@ const mdLabel=s=>`${Number(s.slice(5,7))}/${Number(s.slice(8,10))}`;
 /* 給料日＝その月の最後の平日（土日と、銀行が休みの12/29〜31を除く。祝日は要確認） */
 function paydayOf(ym){const d=new Date(Number(ym.slice(0,4)),Number(ym.slice(5))-1,daysIn(ym));while(d.getDay()===0||d.getDay()===6||(d.getMonth()===11&&d.getDate()>=29))d.setDate(d.getDate()-1);return fmtD(d)}
 function nextPayday(){const t=today();let ym=ymOf(t);let p=paydayOf(ym);if(p<t){ym=addMonth(ym,1);p=paydayOf(ym)}return p}
+/* まとめ払いの日：ym 月の給料（その月の最後の平日）で払う分の支払日。
+   設定「月末の給料日に入ったお金は翌月分として扱う」がオンなら翌月1日（例：9/30の給料で払う分は 10/1）、オフなら給料日そのもの */
+const bundleDateOf=ym=>db.settings.monthStartsAtPayday?`${addMonth(ym,1)}-01`:paydayOf(ym);
+/* 指定日より後で、いちばん近いまとめ払いの日 */
+function nextBundleAfter(dateStr){const ym=ymOf(dateStr);for(const k of [-2,-1,0,1,2]){const d=bundleDateOf(addMonth(ym,k));if(d>dateStr)return d}return bundleDateOf(addMonth(ym,2))}
+/* 記録がどの月の収支に入るか。給料日以降に入った収入は翌月の収入として数える（設定がオンのとき） */
+function entryYM(e){const ym=ymOf(e.date);if(e.type==='income'&&db.settings.monthStartsAtPayday&&e.date>=paydayOf(ym))return addMonth(ym,1);return ym}
 const yen=n=>(n<0?'−':'')+'¥'+Math.abs(Math.round(n)).toLocaleString('ja-JP');
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 const sum=a=>a.reduce((s,e)=>s+(Number(e.amount)||0),0);
-const inMonth=(ym,type)=>db.entries.filter(e=>ymOf(e.date)===ym&&(!type||e.type===type));
+const inMonth=(ym,type)=>db.entries.filter(e=>entryYM(e)===ym&&(!type||e.type===type));
 const isFixedCat=c=>c===FIXED_CAT||c===DEBT_CAT;
 function byCat(list){const o={};list.forEach(e=>{o[e.cat]=(o[e.cat]||0)+Number(e.amount)});return o}
 function catColor(c){const i=db.settings.expenseCats.indexOf(c);return i<0?GRAY:PALETTE[i%PALETTE.length]}
@@ -358,7 +366,7 @@ function acomSim(a){
   const rows=[];let bal=Number(a.balance)||0,totalInt=0,last=null;
   if(!(bal>0)||!a.asOf||!a.nextDue)return {rows,totalInt,payoff:null};
   let prev=parseD(a.asOf),d;
-  if(a.cycle==='payday'){let ym=ymOf(a.asOf);let p=paydayOf(ym);if(p<=a.asOf){ym=addMonth(ym,1);p=paydayOf(ym)}d=parseD(p)}else d=parseD(a.nextDue);
+  if(a.cycle==='payday')d=parseD(nextBundleAfter(a.asOf));else d=parseD(a.nextDue);
   for(let i=0;i<400&&bal>0;i++){
     const days=Math.max(1,Math.round((d-prev)/864e5));
     const interest=Math.round(bal*((Number(a.rate)||0)/100)/365*days);
@@ -367,7 +375,7 @@ function acomSim(a){
     const nb=bal+interest-pay;
     rows.push({date:fmtD(d),amount:pay,interest,principal:pay-interest,balance:nb,changed:last!==null&&pay!==last});
     totalInt+=interest;last=pay;bal=nb;prev=d;d=new Date(d);
-    if(a.cycle==='payday')d=parseD(paydayOf(addMonth(ymOf(fmtD(d)),1)));else if(a.cycle==='35d')d.setDate(d.getDate()+35);else d.setMonth(d.getMonth()+1);
+    if(a.cycle==='payday')d=parseD(nextBundleAfter(fmtD(d)));else if(a.cycle==='35d')d.setDate(d.getDate()+35);else d.setMonth(d.getMonth()+1);
   }
   return {rows,totalInt,payoff:rows.length?rows[rows.length-1].date:null};
 }
@@ -378,19 +386,19 @@ function companySim(c){
   for(let i=0;i<600&&bal>0;i++){
     let pay=bm.includes(Number(ym.slice(5)))?Number(c.bonus)||0:Number(c.monthly)||0;
     if(pay<=0)break;if(pay>bal)pay=bal;bal-=pay;
-    rows.push({ym,date:db.settings.payAll?paydayOf(ym):`${ym}-${pad(daysIn(ym))}`,amount:pay,balance:bal,no:i+1});ym=addMonth(ym,1);
+    rows.push({ym,date:db.settings.payAll?bundleDateOf(ym):`${ym}-${pad(daysIn(ym))}`,amount:pay,balance:bal,no:i+1});ym=addMonth(ym,1);
   }
   return rows;
 }
 function paidyRows(p){
-  return (p.schedule||[]).filter(r=>Number(r.amount)>0&&/^\d{4}-\d{2}$/.test(r.ym||'')).map(r=>{const dm=addMonth(r.ym,1);return {ym:r.ym,date:db.settings.payAll?paydayOf(r.ym):`${dm}-${pad(Math.min(Number(p.dueDay)||10,daysIn(dm)))}`,amount:Math.round(Number(r.amount))}}).sort((a,b)=>a.date.localeCompare(b.date));
+  return (p.schedule||[]).filter(r=>Number(r.amount)>0&&/^\d{4}-\d{2}$/.test(r.ym||'')).map(r=>{const dm=addMonth(r.ym,1);return {ym:r.ym,date:db.settings.payAll?bundleDateOf(r.ym):`${dm}-${pad(Math.min(Number(p.dueDay)||10,daysIn(dm)))}`,amount:Math.round(Number(r.amount))}}).sort((a,b)=>a.date.localeCompare(b.date));
 }
 /* 期間内の支払い予定（固定費＋返済）を日付順で返す */
 function obligations(from,to){
   const L=[],S=db.settings,D=S.debts;
-  let ym=ymOf(from);const endYM=ymOf(to);
+  let ym=addMonth(ymOf(from),-1);const endYM=ymOf(to); /* まとめ払いの日は翌月に入るので、1ヶ月前から見る */
   while(ym<=endYM){
-    (S.fixed||[]).forEach(f=>{if(!(Number(f.amount)>0))return;const day=f.day?Math.min(Number(f.day),daysIn(ym)):daysIn(ym);const date=S.payAll?paydayOf(ym):`${ym}-${pad(day)}`;if(date>=from&&date<=to)L.push({key:`fixed:${f.id}:${ym}`,name:f.name,date,amount:Math.round(Number(f.amount)),kind:'fixed',cat:FIXED_CAT,note:(S.payAll||f.day)?'':'支払日は未設定（月末扱い）'})});
+    (S.fixed||[]).forEach(f=>{if(!(Number(f.amount)>0))return;const date=f.day?`${ym}-${pad(Math.min(Number(f.day),daysIn(ym)))}`:(S.payAll?bundleDateOf(ym):`${ym}-${pad(daysIn(ym))}`);if(date>=from&&date<=to)L.push({key:`fixed:${f.id}:${ym}`,name:f.name,date,amount:Math.round(Number(f.amount)),kind:'fixed',cat:FIXED_CAT,note:(S.payAll||f.day)?'':'支払日は未設定（月末扱い）'})});
     ym=addMonth(ym,1);
   }
   if(D.company.enabled)companySim(D.company).forEach(r=>{if(r.date>=from&&r.date<=to)L.push({key:`company:${r.ym}`,name:D.company.name,date:r.date,amount:r.amount,kind:'company',cat:DEBT_CAT,note:`${r.no}回目・返済後の残り ${yen(r.balance)}`})});
@@ -494,8 +502,9 @@ function obligationsHTML(ym){
   const L=monthObligations(ym);
   if(!L.length)return '<p class="empty">この月の固定費・返済の予定はありません。設定の「固定費と返済」から登録できます</p>';
   const unpaid=L.filter(o=>!o.paid),total=sum(L),due=sum(unpaid),over=unpaid.filter(o=>o.overdue);
-  const pd=nextPayday();const onPd=unpaid.filter(o=>o.date===pd);const daysTo=Math.round((parseD(pd)-parseD(today()))/864e5);
-  const pdLine=db.settings.payAll&&onPd.length?`<div class="payday">次の給料日 <b>${mdLabel(pd)}</b>（${daysTo===0?'今日':`あと${daysTo}日`}）に出るのは <b>${yen(sum(onPd))}</b>・${onPd.length}件。給料が入ったら先にこれを払ってください</div>`:'';
+  /* この月のまとめ払い（前月の給料で払う分）がまだ残っていれば、先に払うよう促す */
+  const bd=bundleDateOf(addMonth(ym,-1)),salary=paydayOf(addMonth(ym,-1));const onPd=unpaid.filter(o=>o.date===bd);const daysTo=Math.round((parseD(bd)-parseD(today()))/864e5);
+  const pdLine=db.settings.payAll&&onPd.length?`<div class="payday">${mdLabel(salary)}の給料から <b>${mdLabel(bd)}</b>（${daysTo===0?'今日':daysTo>0?`あと${daysTo}日`:`${-daysTo}日前`}）に払うのは <b>${yen(sum(onPd))}</b>・${onPd.length}件。先にこれを払ってください</div>`:'';
   return `${pdLine}<div class="ob-head"><div><div class="lbl">この月の合計</div><div class="mid">${yen(total)}</div></div><div><div class="lbl">まだ払っていない分</div><div class="mid ${due?'':'good'}">${yen(due)}</div></div>${over.length?`<div class="bad" style="font-size:12px;font-weight:700">期限を過ぎたものが ${over.length}件あります</div>`:''}</div><ul class="oblist">${L.map(o=>`<li class="${o.paid?'done':''} ${o.overdue?'over':''}"><span class="ob-date">${mdLabel(o.date)}</span><span class="ob-body"><span class="ob-name"><span class="sw" style="background:${catColor(o.cat)}"></span>${esc(o.name)}</span>${o.note||o.overdue||o.before?`<span class="ob-note ${o.overdue?'bad':''}">${o.overdue?'期限超過 ':o.before?'記録開始前 ':''}${esc(o.note||'')}</span>`:''}</span><span class="ob-amt n">${yen(o.amount)}</span><button class="paybtn ${o.paid?'on':''}" data-pay="${esc(o.key)}">${o.paid?'済':'払った'}</button></li>`).join('')}</ul>`;
 }
 /* 借金の状況 */
@@ -515,12 +524,14 @@ function fixedSettingsHTML(){
   const fixedRows=(S.fixed||[]).map(f=>`<tr data-fx="${esc(f.id)}"><td data-l="名前"><input type="text" class="fx-name" value="${esc(f.name)}" placeholder="例：Wi-Fi（手数料込）" aria-label="名前"></td><td data-l="金額（円）"><input type="number" inputmode="numeric" class="fx-amt" min="0" value="${f.amount||''}" placeholder="金額" aria-label="金額"></td><td data-l="支払日"><input type="number" inputmode="numeric" class="fx-day" min="1" max="31" value="${f.day||''}" placeholder="月末" aria-label="支払日"></td><td class="rm"><button type="button" class="del" data-rmfx="${esc(f.id)}" aria-label="削除">×</button></td></tr>`).join('');
   const paidyRowsHTML=(D.paidy.schedule||[]).map((r,i)=>`<tr><td data-l="利用月"><input type="month" class="pd-ym" value="${esc(r.ym)}" aria-label="利用月"></td><td data-l="金額（円）"><input type="number" inputmode="numeric" class="pd-amt" min="0" value="${r.amount||''}" placeholder="金額" aria-label="金額"></td><td class="rm"><button type="button" class="del" data-rmpd="${i}" aria-label="削除">×</button></td></tr>`).join('');
   return `
-  <label class="chk payall"><input type="checkbox" id="payAll" ${S.payAll?'checked':''}> 返済・固定費はすべて給料日（その月の最後の平日）にまとめて払う</label>
-  <p class="hint">オンのとき、下の支払日や返済日の設定より給料日が優先されます。あと払いは「◯月分」をその月の給料日に払う扱いです。12月は29〜31日を避けて計算します。祝日が月末に絡む月は日付を確認してください。</p>
+  <label class="chk payall"><input type="checkbox" id="monthStart" ${S.monthStartsAtPayday?'checked':''}> 月末の給料日に入ったお金は、翌月分として扱う</label>
+  <p class="hint">オンのとき、給料日（その月の最後の平日）以降に記録した収入は翌月の収入に入り、まとめ払いの日は翌月1日になります。例：9/30の給料も、そこから10/1に払う返済も、どちらも10月の収支です。オフのときは、まとめ払いの日は給料日そのものです。</p>
+  <label class="chk payall"><input type="checkbox" id="payAll" ${S.payAll?'checked':''}> 返済と、支払日が空欄の固定費は、給料でまとめて払う</label>
+  <p class="hint">オンのとき、返済（アコム・会社借入・あと払い）と支払日が空欄の固定費は「まとめ払いの日」になります。固定費に支払日を入れたものは、その日のままです。あと払いは「◯月分」をその月の給料で払う扱いです。12月の給料日は29〜31日を避けて計算します。祝日が月末に絡む月は日付を確認してください。</p>
   <label class="chk payall"><input type="checkbox" id="paidOnDue" ${S.paidOnDue?'checked':''}> 「払った」を押したときの支出の日付を、予定日にそろえる</label>
   <p class="hint">オフのときは、ボタンを押した日（実際に払った日）の支出として記録します。</p>
   <h4>毎月の固定費</h4>
-  <p class="hint">コンビニ払いは手数料込みの金額で入れてください。支払日が空欄なら月末扱いになります。</p>
+  <p class="hint">コンビニ払いは手数料込みの金額で入れてください。支払日を入れるとその日に、空欄ならまとめ払いの日（まとめ払いがオフなら月末）になります。</p>
   <div class="tblwrap"><table class="fxt fx-fixed"><thead><tr><th>名前</th><th>金額（円）</th><th>支払日</th><th></th></tr></thead><tbody id="fxRows">${fixedRows}</tbody></table></div>
   <button type="button" class="ghost" id="addFx">＋ 固定費を追加</button>
 
@@ -556,6 +567,7 @@ function readFixedSettings(){
   const S=db.settings,D=S.debts,g=id=>document.getElementById(id);
   if(!g('fxRows'))return;
   S.payAll=g('payAll').checked;
+  S.monthStartsAtPayday=g('monthStart').checked;
   S.paidOnDue=g('paidOnDue').checked;
   S.fixed=[...document.querySelectorAll('#fxRows tr')].map(tr=>({id:tr.dataset.fx,name:tr.querySelector('.fx-name').value.trim()||'固定費',amount:Math.round(Number(tr.querySelector('.fx-amt').value))||0,day:Number(tr.querySelector('.fx-day').value)||null})).filter(f=>f.name!=='固定費'||f.amount>0);
   Object.assign(D.acom,{enabled:g('acOn').checked,balance:Math.round(Number(g('acBal').value))||0,asOf:g('acAsOf').value||today(),nextDue:g('acNext').value||'',cycle:g('acCycle').value,rate:Number(g('acRate').value)||0,minPct:Number(g('acPct').value)||3});
@@ -683,7 +695,7 @@ function addEntry(){
   if(!(amt>0)){toast('金額を入力してください');$('fAmt').focus();return}
   db.entries.push({id:uid(),date,type:fType,cat:fCat,amount:amt,memo:$('fMemo').value.trim()});
   if(!save())return;
-  $('fAmt').value='';$('fMemo').value='';$('fAmt').blur();$('fMemo').blur();viewYM=ymOf(date);renderAll();
+  $('fAmt').value='';$('fMemo').value='';$('fAmt').blur();$('fMemo').blur();viewYM=entryYM({type:fType,date});renderAll();
   toast(`記録しました（${streakInfo().cur}日連続）`);
 }
 function noSpend(){const t=today();if(!db.noSpend.includes(t))db.noSpend.push(t);save();renderAll();toast(`支出なしで記録しました（${streakInfo().cur}日連続）`)}
